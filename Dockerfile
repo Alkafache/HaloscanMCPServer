@@ -1,26 +1,34 @@
-
-FROM node:18-alpine
-
+# ---------- deps ----------
+FROM node:20-alpine AS deps
 WORKDIR /app
-
-# Copy package files
 COPY package*.json ./
-
-# Install dependencies
 RUN npm ci
 
-# Copy source code
+# ---------- build ----------
+FROM node:20-alpine AS build
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-
-# Build TypeScript
+# Parano: au cas où tsc n'ait pas le bit exécutable sur Alpine
+RUN chmod +x node_modules/.bin/tsc || true
+# Compile TypeScript (ton package.json appelle npx tsc)
 RUN npm run build
 
-# Expose the server port for HTTP/SSE mode
+# ---------- runtime ----------
+FROM node:20-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+ENV PORT=3000
 EXPOSE 3000
 
-# Set environment variable with placeholder (override at runtime)
-ENV HALOSCAN_API_KEY=""
-ENV PORT=3000
+# On ne copie que le build et package.json pour une image plus légère
+COPY --from=build /app/build ./build
+COPY package*.json ./
+# Installe uniquement les deps de prod
+RUN npm ci --omit=dev
 
-# Command to run the application in HTTP mode
+# (Optionnel) Healthcheck si tu as un /health dans http-server
+# HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD wget -qO- 127.0.0.1:3000/health || exit 1
+
+# Démarrage du serveur HTTP/SSE MCP
 CMD ["node", "build/http-server.js"]
