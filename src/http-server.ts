@@ -35,7 +35,6 @@ function authorizeRequest(req: Request, res: Response, next: NextFunction): void
 
 // ---- App ----
 const app = express();
-app.set("trust proxy", 1); // important pour forcer https si derrière un proxy
 
 // Logs
 app.use((req, _res, next) => {
@@ -78,23 +77,31 @@ app.get("/sse", (req: Request, res: Response): void => {
     return;
   }
 
-  // En-têtes SSE
+  // En-têtes SSE (anti-buffering + no-transform)
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no");
 
+  // Flush immédiat des headers
   (res as any).flushHeaders?.();
+
+  // Timeout long
   req.socket.setTimeout(CONNECTION_TIMEOUT * 1000);
 
-  // Compatibilité SDK 1.7 vs 1.8
+  // Support des différentes signatures du SDK
   const SSECtor: any = SSEServerTransport as any;
   const transport: any =
     SSECtor.length >= 2
-      ? new SSECtor("/messages", res) // SDK <=1.7.x
-      : new SSECtor({ req, res });    // SDK >=1.8.x
+      ? new SSECtor("/messages", res) // ancienne signature
+      : new SSECtor({ req, res }); // nouvelle signature
 
+  // @ts-ignore
   const sessionId: string = (transport as any).sessionId;
+
+  // 🔸 Envoi MANUEL de l’événement initial
+  res.write(`event: endpoint\n`);
+  res.write(`data: https://haloscan.dokify.eu/messages?sessionId=${sessionId}\n\n`);
 
   transports[sessionId] = transport;
   activeConnections++;
@@ -103,22 +110,26 @@ app.get("/sse", (req: Request, res: Response): void => {
     `[${new Date().toISOString()}] SSE connection established: ${sessionId} (${activeConnections}/${MAX_CONNECTIONS} active)`
   );
 
+  // 🔹 Keepalive ping pour éviter la fermeture
+  const keepAlive = setInterval(() => {
+    try {
+      res.write(`: ping\n\n`);
+    } catch (err) {
+      console.error("Erreur keepalive", err);
+      clearInterval(keepAlive);
+    }
+  }, 15000);
+
   res.on("close", () => {
     console.log(`[${new Date().toISOString()}] SSE connection closed: ${sessionId}`);
     delete transports[sessionId];
     activeConnections--;
+    clearInterval(keepAlive);
   });
 
   // Branche MCP
   // @ts-ignore
   server.connect(transport);
-
-  // 🔹 Envoi unique de l’événement endpoint (absolu)
-  const absoluteUrl = `${req.protocol}://${req.get("host")}/messages?sessionId=${sessionId}`;
-  res.write(`event: endpoint\n`);
-  res.write(`data: ${absoluteUrl}\n\n`);
-
-  console.log(`[${new Date().toISOString()}] Sent endpoint event for session ${sessionId} -> ${absoluteUrl}`);
 });
 
 // ---- Messages ----
