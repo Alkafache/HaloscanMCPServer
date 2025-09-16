@@ -110,6 +110,18 @@ app.get("/sse", (req: Request, res: Response): void => {
 
   // IMPORTANT : ne pas écrire de headers/événements ici ; le SDK s'en charge
   server.connect(transport);
+
+  // Émettre l'événement "endpoint" APRÈS que le SDK ait démarré le flux
+  setImmediate(() => {
+    try {
+      const sid: string = (transport as any).sessionId;
+      res.write(`event: endpoint\n`);
+      res.write(`data: /messages?sessionId=${sid}\n\n`);
+      console.log(`[${new Date().toISOString()}] Sent endpoint event for session ${sid}`);
+    } catch (e) {
+      console.error("Failed to write endpoint event:", e);
+    }
+  });
 });
 
 // ---- POST /messages : pont de messages MCP ----
