@@ -17,7 +17,7 @@ const SERVER_VERSION = process.env.MCP_SERVER_VERSION || "1.0.0";
 const MAX_CONNECTIONS = parseInt(process.env.MCP_MAX_CONNECTIONS || "100", 10);
 const CONNECTION_TIMEOUT = parseInt(process.env.MCP_CONNECTION_TIMEOUT || "3600", 10);
 
-// ---- Auth (optionnelle) ----
+// ---- Auth ----
 function authorizeRequest(req: Request, res: Response, next: NextFunction): void {
   if (!AUTH_ENABLED) return next();
   const authHeader = req.headers.authorization;
@@ -36,13 +36,11 @@ function authorizeRequest(req: Request, res: Response, next: NextFunction): void
 // ---- App ----
 const app = express();
 
-// Logs
 app.use((req, _res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
   next();
 });
 
-// CORS + preflight
 app.use(
   cors({
     origin: CORS_ORIGIN,
@@ -52,54 +50,42 @@ app.use(
   })
 );
 app.options("*", (_req, res) => res.sendStatus(200));
-
-// Body parser
 app.use(express.json());
 
 // ---- MCP server ----
 const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
 console.log("Server configured with Haloscan tools (minimal)");
 
-// Suivi des transports
+// ---- Transports ----
 const transports: Record<string, SSEServerTransport> = {};
 let activeConnections = 0;
 
-// Protéger SSE/messages si auth activée
 app.use(["/sse", "/messages"], authorizeRequest);
 
-// Certains clients commencent par POST /sse : réponds 200
+// Certains clients commencent par POST /sse
 app.post("/sse", (_req, res) => res.status(200).end());
 
-// ---- SSE endpoint ----
+// ---- SSE ----
 app.get("/sse", (req: Request, res: Response): void => {
   if (activeConnections >= MAX_CONNECTIONS) {
     res.status(503).send({ error: "Service Unavailable", message: "Maximum number of connections reached" });
     return;
   }
 
-  // En-têtes SSE (anti-buffering + no-transform)
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no");
-
-  // Flush immédiat des headers
   (res as any).flushHeaders?.();
 
-  // Timeout long
   req.socket.setTimeout(CONNECTION_TIMEOUT * 1000);
 
-  // Support des différentes signatures du SDK
   const SSECtor: any = SSEServerTransport as any;
   const transport: any =
-    SSECtor.length >= 2
-      ? new SSECtor("/messages", res) // ancienne signature
-      : new SSECtor({ req, res }); // nouvelle signature
+    SSECtor.length >= 2 ? new SSECtor("/messages", res) : new SSECtor({ req, res });
 
-  // @ts-ignore
   const sessionId: string = (transport as any).sessionId;
 
-  // 🔸 Envoi MANUEL de l’événement initial
   res.write(`event: endpoint\n`);
   res.write(`data: https://haloscan.dokify.eu/messages?sessionId=${sessionId}\n\n`);
 
@@ -110,25 +96,18 @@ app.get("/sse", (req: Request, res: Response): void => {
     `[${new Date().toISOString()}] SSE connection established: ${sessionId} (${activeConnections}/${MAX_CONNECTIONS} active)`
   );
 
-  // 🔹 Keepalive ping pour éviter la fermeture
-  const keepAlive = setInterval(() => {
-    try {
-      res.write(`: ping\n\n`);
-    } catch (err) {
-      console.error("Erreur keepalive", err);
-      clearInterval(keepAlive);
-    }
-  }, 15000);
-
+  // ✅ cleanup retardé pour éviter la perte immédiate du transport
   res.on("close", () => {
     console.log(`[${new Date().toISOString()}] SSE connection closed: ${sessionId}`);
-    delete transports[sessionId];
-    activeConnections--;
-    clearInterval(keepAlive);
+    setTimeout(() => {
+      if (transports[sessionId]) {
+        delete transports[sessionId];
+        activeConnections--;
+        console.log(`[${new Date().toISOString()}] Transport cleaned for sessionId ${sessionId}`);
+      }
+    }, 30000); // garde en mémoire 30 secondes
   });
 
-  // Branche MCP
-  // @ts-ignore
   server.connect(transport);
 });
 
@@ -155,7 +134,7 @@ app.post("/messages", (req: Request, res: Response): void => {
   transport.handlePostMessage(req, res);
 });
 
-// ---- Tools-info (hardcodé pour debug) ----
+// ---- Tools-info ----
 app.get("/tools-info", (_req: Request, res: Response): void => {
   const tools = getHardcodedTools();
   res.status(200).send({
@@ -198,7 +177,7 @@ function getHardcodedTools(): any[] {
   ];
 }
 
-// ---- Health & root ----
+// ---- Health ----
 app.get("/health", (_req: Request, res: Response): void => {
   res.status(200).send({
     status: "ok",
@@ -227,7 +206,6 @@ const httpServer = app.listen(PORT, () => {
   console.log(`Max connections: ${MAX_CONNECTIONS}`);
 });
 
-// Graceful shutdown
 process.on("SIGTERM", () => {
   console.log("SIGTERM received, shutting down gracefully");
   httpServer.close(() => {
