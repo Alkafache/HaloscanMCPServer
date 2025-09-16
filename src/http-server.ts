@@ -123,7 +123,7 @@ app.get("/sse", (req: Request, res: Response): void => {
   // Increase timeout for long-lived connections
   req.socket.setTimeout(CONNECTION_TIMEOUT * 1000);
   
-  const transport = new SSEServerTransport("/messages", res);
+  const transport = new SSEServerTransport({ req, res });
   transports[transport.sessionId] = transport;
   
   // Increment connection count
