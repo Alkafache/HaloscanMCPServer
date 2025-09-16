@@ -72,7 +72,12 @@ let activeConnections = 0;
 app.use(["/sse", "/messages"], authorizeRequest);
 
 // Certains clients commencent par POST /sse : réponds 200
-app.post("/sse", (_req, res) => res.status(200).end());
+app.post("/sse", (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.status(200).json({ ok: true, endpoint: "/messages" });
+});
 
 // ---- SSE endpoint ----
 app.get("/sse", (req: Request, res: Response): void => {
