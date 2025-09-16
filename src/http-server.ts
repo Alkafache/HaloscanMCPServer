@@ -17,15 +17,6 @@ const SERVER_VERSION = process.env.MCP_SERVER_VERSION || "1.0.0";
 const MAX_CONNECTIONS = parseInt(process.env.MCP_MAX_CONNECTIONS || "100", 10);
 const CONNECTION_TIMEOUT = parseInt(process.env.MCP_CONNECTION_TIMEOUT || "3600", 10);
 
-// ---- Helpers ----
-function absoluteUrl(req: Request, path: string) {
-  const proto = (req.headers["x-forwarded-proto"] as string) || req.protocol || "https";
-  const host = req.headers.host!;
-  if (path.startsWith("http")) return path;
-  if (!path.startsWith("/")) path = `/${path}`;
-  return `${proto}://${host}${path}`;
-}
-
 // ---- Auth (optionnelle) ----
 function authorizeRequest(req: Request, res: Response, next: NextFunction): void {
   if (!AUTH_ENABLED) return next();
@@ -44,6 +35,7 @@ function authorizeRequest(req: Request, res: Response, next: NextFunction): void
 
 // ---- App ----
 const app = express();
+app.set("trust proxy", 1); // important pour forcer https si derrière un proxy
 
 // Logs
 app.use((req, _res, next) => {
@@ -76,34 +68,34 @@ let activeConnections = 0;
 // Protéger SSE/messages si auth activée
 app.use(["/sse", "/messages"], authorizeRequest);
 
-// --- POST /sse : certains clients (dont ChatGPT) l'appellent d'abord ---
-app.post("/sse", (req, res) => {
-  const baseMessages = "/messages";
-  const endpointAbs = absoluteUrl(req, baseMessages);
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  res.setHeader("Content-Type", "application/json; charset=utf-8");
-  res.status(200).json({ ok: true, endpoint: endpointAbs });
-});
+// Certains clients commencent par POST /sse : réponds 200
+app.post("/sse", (_req, res) => res.status(200).end());
 
-// ---- GET /sse : ouvre le flux SSE (laisser le SDK gérer headers) ----
+// ---- SSE endpoint ----
 app.get("/sse", (req: Request, res: Response): void => {
   if (activeConnections >= MAX_CONNECTIONS) {
     res.status(503).send({ error: "Service Unavailable", message: "Maximum number of connections reached" });
     return;
   }
 
-  // Connexion longue
+  // En-têtes SSE
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+
+  (res as any).flushHeaders?.();
   req.socket.setTimeout(CONNECTION_TIMEOUT * 1000);
 
-  // Compat SDK 1.7.x (2 args) / >=1.8.x ({ req, res })
+  // Compatibilité SDK 1.7 vs 1.8
   const SSECtor: any = SSEServerTransport as any;
   const transport: any =
     SSECtor.length >= 2
-      ? new SSECtor("/messages", res) // ancienne signature
-      : new SSECtor({ req, res });    // nouvelle signature
+      ? new SSECtor("/messages", res) // SDK <=1.7.x
+      : new SSECtor({ req, res });    // SDK >=1.8.x
 
   const sessionId: string = (transport as any).sessionId;
+
   transports[sessionId] = transport;
   activeConnections++;
 
@@ -117,21 +109,19 @@ app.get("/sse", (req: Request, res: Response): void => {
     activeConnections--;
   });
 
-  // Laisse le SDK démarrer, puis envoie notre event endpoint avec URL absolue
+  // Branche MCP
+  // @ts-ignore
   server.connect(transport);
-  setImmediate(() => {
-    try {
-      const endpointAbs = absoluteUrl(req, `/messages?sessionId=${sessionId}`);
-      res.write(`event: endpoint\n`);
-      res.write(`data: ${endpointAbs}\n\n`);
-      console.log(`[${new Date().toISOString()}] Sent endpoint event for session ${sessionId} -> ${endpointAbs}`);
-    } catch (e) {
-      console.error("Failed to write endpoint event:", e);
-    }
-  });
+
+  // 🔹 Envoi unique de l’événement endpoint (absolu)
+  const absoluteUrl = `${req.protocol}://${req.get("host")}/messages?sessionId=${sessionId}`;
+  res.write(`event: endpoint\n`);
+  res.write(`data: ${absoluteUrl}\n\n`);
+
+  console.log(`[${new Date().toISOString()}] Sent endpoint event for session ${sessionId} -> ${absoluteUrl}`);
 });
 
-// ---- POST /messages : pont de messages MCP ----
+// ---- Messages ----
 app.post("/messages", (req: Request, res: Response): void => {
   const sessionId = String(req.query.sessionId || "");
   console.log("POST /messages", { sessionId, hasBody: !!req.body });
@@ -148,27 +138,54 @@ app.post("/messages", (req: Request, res: Response): void => {
     return;
   }
 
-  // CORS ceinture + bretelles
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
   transport.handlePostMessage(req, res);
 });
 
-// ---- Tools-info (debug) ----
+// ---- Tools-info (hardcodé pour debug) ----
 app.get("/tools-info", (_req: Request, res: Response): void => {
+  const tools = getHardcodedTools();
   res.status(200).send({
     server: SERVER_NAME,
     version: SERVER_VERSION,
-    endpoints: {
-      sse: "/sse",
-      messages: "/messages",
-      health: "/health",
-      tools: "/tools-info",
-    },
+    tools,
+    endpoints: { sse: "/sse", messages: "/messages", health: "/health", tools: "/tools-info" },
     stats: { activeConnections, maxConnections: MAX_CONNECTIONS, uptime: process.uptime() },
   });
 });
+
+function getHardcodedTools(): any[] {
+  return [
+    {
+      name: "set_api_key",
+      description: "Définir la clé API.",
+      parameters: { properties: { apiKey: { type: "string", description: "Your Haloscan API key" } }, required: ["apiKey"] },
+    },
+    {
+      name: "get_user_credit",
+      description: "Obtenir les informations de crédit de l'utilisateur.",
+      parameters: { properties: {}, required: [] },
+    },
+    {
+      name: "get_keywords_overview",
+      description: "Obtenir un aperçu des mots-clés.",
+      parameters: {
+        properties: {
+          keyword: { type: "string", description: "Seed keyword" },
+          requested_data: { type: "array", items: { type: "string" }, description: "Specific data fields to request" },
+        },
+        required: ["keyword", "requested_data"],
+      },
+    },
+    {
+      name: "get_keywords_match",
+      description: "Obtenir la correspondance des mots-clés.",
+      parameters: { properties: { keyword: { type: "string", description: "Seed keyword" } }, required: ["keyword"] },
+    },
+  ];
+}
 
 // ---- Health & root ----
 app.get("/health", (_req: Request, res: Response): void => {
@@ -187,10 +204,7 @@ app.get("/", (_req: Request, res: Response): void => res.redirect("/tools-info")
 // ---- Error handler ----
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction): void => {
   console.error(`[${new Date().toISOString()}] Server error:`, err);
-  res.status(500).send({
-    error: "Internal Server Error",
-    message: NODE_ENV === "development" ? err.message : "An unexpected error occurred",
-  });
+  res.status(500).send({ error: "Internal Server Error", message: NODE_ENV === "development" ? err.message : "An unexpected error occurred" });
 });
 
 // ---- Start ----
