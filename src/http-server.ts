@@ -137,4 +137,83 @@ app.post("/messages", (req: Request, res: Response): void => {
   transport.handlePostMessage(req, res);
 });
 
-// -
+// ---- Tools-info (hardcodé pour debug) ----
+app.get("/tools-info", (_req: Request, res: Response): void => {
+  const tools = getHardcodedTools();
+  res.status(200).send({
+    server: SERVER_NAME,
+    version: SERVER_VERSION,
+    tools,
+    endpoints: { sse: "/sse", messages: "/messages", health: "/health", tools: "/tools-info" },
+    stats: { activeConnections, maxConnections: MAX_CONNECTIONS, uptime: process.uptime() },
+  });
+});
+
+function getHardcodedTools(): any[] {
+  return [
+    {
+      name: "set_api_key",
+      description: "Définir la clé API.",
+      parameters: { properties: { apiKey: { type: "string", description: "Your Haloscan API key" } }, required: ["apiKey"] },
+    },
+    {
+      name: "get_user_credit",
+      description: "Obtenir les informations de crédit de l'utilisateur.",
+      parameters: { properties: {}, required: [] },
+    },
+    {
+      name: "get_keywords_overview",
+      description: "Obtenir un aperçu des mots-clés.",
+      parameters: {
+        properties: {
+          keyword: { type: "string", description: "Seed keyword" },
+          requested_data: { type: "array", items: { type: "string" }, description: "Specific data fields to request" },
+        },
+        required: ["keyword", "requested_data"],
+      },
+    },
+    {
+      name: "get_keywords_match",
+      description: "Obtenir la correspondance des mots-clés.",
+      parameters: { properties: { keyword: { type: "string", description: "Seed keyword" } }, required: ["keyword"] },
+    },
+  ];
+}
+
+// ---- Health & root ----
+app.get("/health", (_req: Request, res: Response): void => {
+  res.status(200).send({
+    status: "ok",
+    server: SERVER_NAME,
+    version: SERVER_VERSION,
+    uptime: process.uptime(),
+    activeConnections,
+    environment: NODE_ENV,
+  });
+});
+
+app.get("/", (_req: Request, res: Response): void => res.redirect("/tools-info"));
+
+// ---- Error handler ----
+app.use((err: Error, _req: Request, res: Response, _next: NextFunction): void => {
+  console.error(`[${new Date().toISOString()}] Server error:`, err);
+  res.status(500).send({ error: "Internal Server Error", message: NODE_ENV === "development" ? err.message : "An unexpected error occurred" });
+});
+
+// ---- Start ----
+const httpServer = app.listen(PORT, () => {
+  console.log(`[${new Date().toISOString()}] ${SERVER_NAME} v${SERVER_VERSION} running on http://localhost:${PORT}`);
+  console.log(`Connect to /sse for SSE transport`);
+  console.log(`Authentication ${AUTH_ENABLED ? "enabled" : "disabled"}`);
+  console.log(`Environment: ${NODE_ENV}`);
+  console.log(`Max connections: ${MAX_CONNECTIONS}`);
+});
+
+// Graceful shutdown
+process.on("SIGTERM", () => {
+  console.log("SIGTERM received, shutting down gracefully");
+  httpServer.close(() => {
+    console.log("HTTP server closed");
+    process.exit(0);
+  });
+});
