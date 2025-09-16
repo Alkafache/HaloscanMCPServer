@@ -4,7 +4,6 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-// import { configureHaloscanServer } from "./haloscan-core.js"; // décommente si tu as tes outils
 
 dotenv.config();
 
@@ -17,6 +16,15 @@ const SERVER_NAME = process.env.MCP_SERVER_NAME || "Haloscan SEO Tools";
 const SERVER_VERSION = process.env.MCP_SERVER_VERSION || "1.0.0";
 const MAX_CONNECTIONS = parseInt(process.env.MCP_MAX_CONNECTIONS || "100", 10);
 const CONNECTION_TIMEOUT = parseInt(process.env.MCP_CONNECTION_TIMEOUT || "3600", 10);
+
+// ---- Helpers ----
+function absoluteUrl(req: Request, path: string) {
+  const proto = (req.headers["x-forwarded-proto"] as string) || req.protocol || "https";
+  const host = req.headers.host!;
+  if (path.startsWith("http")) return path;
+  if (!path.startsWith("/")) path = `/${path}`;
+  return `${proto}://${host}${path}`;
+}
 
 // ---- Auth (optionnelle) ----
 function authorizeRequest(req: Request, res: Response, next: NextFunction): void {
@@ -59,7 +67,6 @@ app.use(express.json());
 
 // ---- MCP server ----
 const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
-// configureHaloscanServer(server); // décommente si tu as des tools à enregistrer
 console.log("Server configured with Haloscan tools (minimal)");
 
 // Suivi des transports
@@ -70,14 +77,16 @@ let activeConnections = 0;
 app.use(["/sse", "/messages"], authorizeRequest);
 
 // --- POST /sse : certains clients (dont ChatGPT) l'appellent d'abord ---
-app.post("/sse", (_req, res) => {
+app.post("/sse", (req, res) => {
+  const baseMessages = "/messages";
+  const endpointAbs = absoluteUrl(req, baseMessages);
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Content-Type", "application/json; charset=utf-8");
-  res.status(200).json({ ok: true, endpoint: "/messages" });
+  res.status(200).json({ ok: true, endpoint: endpointAbs });
 });
 
-// ---- GET /sse : ouvre le flux SSE (laisser le SDK gérer headers + endpoint) ----
+// ---- GET /sse : ouvre le flux SSE (laisser le SDK gérer headers) ----
 app.get("/sse", (req: Request, res: Response): void => {
   if (activeConnections >= MAX_CONNECTIONS) {
     res.status(503).send({ error: "Service Unavailable", message: "Maximum number of connections reached" });
@@ -108,16 +117,14 @@ app.get("/sse", (req: Request, res: Response): void => {
     activeConnections--;
   });
 
-  // IMPORTANT : ne pas écrire de headers/événements ici ; le SDK s'en charge
+  // Laisse le SDK démarrer, puis envoie notre event endpoint avec URL absolue
   server.connect(transport);
-
-  // Émettre l'événement "endpoint" APRÈS que le SDK ait démarré le flux
   setImmediate(() => {
     try {
-      const sid: string = (transport as any).sessionId;
+      const endpointAbs = absoluteUrl(req, `/messages?sessionId=${sessionId}`);
       res.write(`event: endpoint\n`);
-      res.write(`data: /messages?sessionId=${sid}\n\n`);
-      console.log(`[${new Date().toISOString()}] Sent endpoint event for session ${sid}`);
+      res.write(`data: ${endpointAbs}\n\n`);
+      console.log(`[${new Date().toISOString()}] Sent endpoint event for session ${sessionId} -> ${endpointAbs}`);
     } catch (e) {
       console.error("Failed to write endpoint event:", e);
     }
@@ -148,47 +155,20 @@ app.post("/messages", (req: Request, res: Response): void => {
   transport.handlePostMessage(req, res);
 });
 
-// ---- Tools-info (hardcodé pour debug) ----
+// ---- Tools-info (debug) ----
 app.get("/tools-info", (_req: Request, res: Response): void => {
   res.status(200).send({
     server: SERVER_NAME,
     version: SERVER_VERSION,
-    tools: getHardcodedTools(),
-    endpoints: { sse: "/sse", messages: "/messages", health: "/health", tools: "/tools-info" },
+    endpoints: {
+      sse: "/sse",
+      messages: "/messages",
+      health: "/health",
+      tools: "/tools-info",
+    },
     stats: { activeConnections, maxConnections: MAX_CONNECTIONS, uptime: process.uptime() },
   });
 });
-
-function getHardcodedTools(): any[] {
-  return [
-    {
-      name: "set_api_key",
-      description: "Définir la clé API.",
-      parameters: { properties: { apiKey: { type: "string", description: "Your Haloscan API key" } }, required: ["apiKey"] },
-    },
-    {
-      name: "get_user_credit",
-      description: "Obtenir les informations de crédit de l'utilisateur.",
-      parameters: { properties: {}, required: [] },
-    },
-    {
-      name: "get_keywords_overview",
-      description: "Obtenir un aperçu des mots-clés.",
-      parameters: {
-        properties: {
-          keyword: { type: "string", description: "Seed keyword" },
-          requested_data: { type: "array", items: { type: "string" }, description: "Specific data fields to request" },
-        },
-        required: ["keyword", "requested_data"],
-      },
-    },
-    {
-      name: "get_keywords_match",
-      description: "Obtenir la correspondance des mots-clés.",
-      parameters: { properties: { keyword: { type: "string", description: "Seed keyword" } }, required: ["keyword"] },
-    },
-  ];
-}
 
 // ---- Health & root ----
 app.get("/health", (_req: Request, res: Response): void => {
