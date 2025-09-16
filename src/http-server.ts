@@ -74,28 +74,36 @@ app.use(["/sse", "/messages"], authorizeRequest);
 // Certains clients commencent par POST /sse : réponds 200
 app.post("/sse", (_req, res) => res.status(200).end());
 
-// ---- SSE ----
+// ---- SSE endpoint ----
 app.get("/sse", (req: Request, res: Response): void => {
   if (activeConnections >= MAX_CONNECTIONS) {
     res.status(503).send({ error: "Service Unavailable", message: "Maximum number of connections reached" });
     return;
   }
 
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
+  // En-têtes SSE (anti-buffering + no-transform)
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no");
+
+  // Flush immédiat des headers (si dispo)
   (res as any).flushHeaders?.();
 
+  // Timeout long
   req.socket.setTimeout(CONNECTION_TIMEOUT * 1000);
 
-  // --- SDK 1.7.x : signature 2 arguments ---
+  // SDK 1.7.x -> signature 2 arguments. Si tu passes le SDK en ^1.8.0, remplace par { req, res }.
   const transport = new SSEServerTransport("/messages", res);
-  // --- SDK >= 1.8.x : utiliser plutôt ---
-  // const transport = new SSEServerTransport({ req, res });
+  // const transport = new SSEServerTransport({ req, res }); // <- si SDK >= 1.8.0
 
-  // @ts-ignore: accès sessionId interne selon version
+  // @ts-ignore
   const sessionId: string = (transport as any).sessionId;
+
+  // 🔸 Envoi MANUEL de l’événement initial (certaines versions/proxys le requièrent)
+  res.write(`event: endpoint\n`);
+  res.write(`data: /messages?sessionId=${sessionId}\n\n`);
+
   transports[sessionId] = transport;
   activeConnections++;
 
@@ -109,10 +117,11 @@ app.get("/sse", (req: Request, res: Response): void => {
     activeConnections--;
   });
 
-  // Brancher le transport au serveur MCP
+  // Branche MCP
   // @ts-ignore
   server.connect(transport);
 });
+
 
 // ---- Messages ----
 app.post("/messages", (req: Request, res: Response): void => {
