@@ -94,8 +94,8 @@ app.get("/sse", (req: Request, res: Response): void => {
   req.socket.setTimeout(CONNECTION_TIMEOUT * 1000);
 
   // SDK 1.7.x -> signature 2 arguments. Si tu passes le SDK en ^1.8.0, remplace par { req, res }.
-  const transport = new SSEServerTransport("/messages", res);
-  // const transport = new SSEServerTransport({ req, res }); // <- si SDK >= 1.8.0
+  // const transport = new SSEServerTransport("/messages", res);
+  const transport = new SSEServerTransport({ req, res }); // <- si SDK >= 1.8.0
 
   // @ts-ignore
   const sessionId: string = (transport as any).sessionId;
