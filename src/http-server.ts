@@ -60,6 +60,18 @@ app.use((req, res, next) => {
   return express.json()(req, res, next);
 });
 
+// ---- Well-known MCP discovery ----
+app.get("/.well-known/mcp.json", (_req, res) => {
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache");
+  res.status(200).send({
+    mcp: { version: "2024-06-01", protocol: "2.0" },
+    sse: { url: "https://haloscan.dokify.eu/sse", heartbeatIntervalMs: 15000 },
+    messages: { url: "https://haloscan.dokify.eu/messages" },
+    server: { name: "Haloscan SEO Tools", version: "1.0.0" }
+  });
+});
+
 // ==== MCP server ====
 const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
 console.log("Server configured with Haloscan tools (minimal)");
