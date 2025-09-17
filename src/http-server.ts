@@ -7,6 +7,7 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 
 dotenv.config();
 
+/** ---- Config ---- */
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const AUTH_ENABLED = process.env.AUTH_ENABLED === "true";
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
@@ -15,19 +16,18 @@ const SERVER_NAME = process.env.MCP_SERVER_NAME || "Haloscan SEO Tools";
 const SERVER_VERSION = process.env.MCP_SERVER_VERSION || "1.0.0";
 const MAX_CONNECTIONS = parseInt(process.env.MCP_MAX_CONNECTIONS || "100", 10);
 const CONNECTION_TIMEOUT = parseInt(process.env.MCP_CONNECTION_TIMEOUT || "3600", 10);
+const PUBLIC_HOST = process.env.PUBLIC_HOST || "haloscan.dokify.eu";
 
+/** ---- HTTP app ---- */
 const app = express();
 
-// si tu es derrière Cloudflare/NGINX, fais confiance au proxy
-app.set("trust proxy", true);
-
-// log simple
+/** Simple logger */
 app.use((req, _res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
   next();
 });
 
-// CORS
+/** CORS + preflight */
 app.use(
   cors({
     origin: CORS_ORIGIN,
@@ -39,7 +39,7 @@ app.use(
 app.options("*", (_req, res) => res.sendStatus(200));
 app.use(express.json());
 
-// --- Auth optionnelle (pour /sse et /messages) ---
+/** Auth optionnelle */
 function authorize(req: Request, res: Response, next: NextFunction) {
   if (!AUTH_ENABLED) return next();
   const h = req.headers.authorization;
@@ -55,18 +55,22 @@ function authorize(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
+/** ---- MCP server ---- */
 const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
+// TODO: enregistrer vos outils ici si besoin (e.g. configureHaloscanServer(server))
 
-// TODO si tu as des outils/prompts : configureHaloscanServer(server);
-
+/** On mémorise les transports actifs pour /messages */
 type TransportMap = Record<string, SSEServerTransport>;
 const transports: TransportMap = {};
 let activeConnections = 0;
 
-// certains clients POSTent /sse : noop 200
+/** Certains clients POSTent /sse par erreur : répondre 200 no-op */
 app.post("/sse", authorize, (_req, res) => res.status(200).end());
 
-// ---- SSE (laisser le SDK écrire ; NE PAS faire res.write) ----
+/** ---- SSE endpoint ----
+ * IMPORTANT : ne pas écrire dans res nous-mêmes; laisser le SDK gérer les events/pings.
+ * On gère les deux signatures (v1.7 et v1.8) côté types ET exécution.
+ */
 app.get("/sse", authorize, (req: Request, res: Response) => {
   if (activeConnections >= MAX_CONNECTIONS) {
     res.status(503).json({ error: "Service Unavailable" });
@@ -76,14 +80,18 @@ app.get("/sse", authorize, (req: Request, res: Response) => {
   // socket longue durée
   req.socket.setTimeout(CONNECTION_TIMEOUT * 1000);
 
-  // SDK >= 1.8.0 : signature { req, res }
-  const transport = new SSEServerTransport({ req, res });
+  // Compatibilité des signatures :
+  // - v1.7 : new SSEServerTransport("/messages", res)
+  // - v1.8 : new SSEServerTransport({ req, res })
+  const Ctor: any = SSEServerTransport as any;
+  const transport: SSEServerTransport =
+    Ctor.length >= 2 ? new Ctor("/messages", res) : new Ctor({ req, res });
 
-  // branchement au serveur MCP -> le SDK gère "endpoint" + pings
-  server.connect(transport);
+  // Connecter le transport au serveur MCP => le SDK enverra "endpoint" + pings
+  server.connect(transport as any);
 
-  // suivi de session
-  // @ts-ignore: sessionId est exposé par le transport
+  // Récupérer un identifiant de session (exposé par le transport)
+  // @ts-ignore
   const sessionId: string = (transport as any).sessionId;
   transports[sessionId] = transport;
   activeConnections++;
@@ -101,7 +109,7 @@ app.get("/sse", authorize, (req: Request, res: Response) => {
   });
 });
 
-// ---- Messages ----
+/** ---- Messages endpoint ---- */
 app.post("/messages", authorize, (req: Request, res: Response) => {
   const sessionId = String(req.query.sessionId || "");
   if (!sessionId) {
@@ -114,26 +122,24 @@ app.post("/messages", authorize, (req: Request, res: Response) => {
     return;
   }
 
-  // CORS permissif pour clients stricts
+  // CORS friendly
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
-  // délègue au SDK JSON-RPC
   transport.handlePostMessage(req, res);
 });
 
-// ---- Fichier de découverte MCP ----
+/** ---- Fichier de découverte MCP ---- */
 app.get("/.well-known/mcp.json", (_req, res) => {
-  const host = process.env.PUBLIC_HOST || "haloscan.dokify.eu";
   res.json({
     mcp: { version: "2024-06-01", protocol: "2.0" },
-    sse: { url: `https://${host}/sse`, heartbeatIntervalMs: 15000 },
-    messages: { url: `https://${host}/messages` },
+    sse: { url: `https://${PUBLIC_HOST}/sse`, heartbeatIntervalMs: 15000 },
+    messages: { url: `https://${PUBLIC_HOST}/messages` },
     server: { name: SERVER_NAME, version: SERVER_VERSION },
   });
 });
 
-// ---- Health ----
+/** Health + root */
 app.get("/health", (_req, res) => {
   res.json({
     status: "ok",
@@ -144,11 +150,9 @@ app.get("/health", (_req, res) => {
     environment: NODE_ENV,
   });
 });
-
-// redirect racine vers mcp.json
 app.get("/", (_req, res) => res.redirect("/.well-known/mcp.json"));
 
-// erreurs
+/** Error handler */
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   console.error(`[${new Date().toISOString()}]`, err);
   res.status(500).json({
@@ -157,8 +161,7 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   });
 });
 
+/** Start */
 app.listen(PORT, () => {
-  console.log(
-    `[${new Date().toISOString()}] ${SERVER_NAME} v${SERVER_VERSION} on :${PORT}`
-  );
+  console.log(`[${new Date().toISOString()}] ${SERVER_NAME} v${SERVER_VERSION} on :${PORT}`);
 });
