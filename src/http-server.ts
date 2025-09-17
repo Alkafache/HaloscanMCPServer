@@ -64,9 +64,6 @@ type TransportMap = Record<string, SSEServerTransport>;
 const transports: TransportMap = {};
 let activeConnections = 0;
 
-/** Certains clients POSTent /sse par erreur : répondre 200 no-op */
-app.post("/sse", authorize, (_req, res) => res.status(200).end());
-
 /** ---- SSE endpoint ----
  * IMPORTANT : ne pas écrire dans res nous-mêmes; laisser le SDK gérer les events/pings.
  * On gère les deux signatures (v1.7 et v1.8) côté types ET exécution.
@@ -163,5 +160,7 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
 
 /** Start */
 app.listen(PORT, () => {
-  console.log(`[${new Date().toISOString()}] ${SERVER_NAME} v${SERVER_VERSION} on :${PORT}`);
+  console.log(
+    `[${new Date().toISOString()}] ${SERVER_NAME} v${SERVER_VERSION} on :${PORT}`
+  );
 });
