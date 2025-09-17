@@ -1,66 +1,111 @@
 // src/http-server.ts
+// ------------------------------------------------------------
+// Haloscan MCP Server (HTTP + SSE) - prêt pour ChatGPT
+// ------------------------------------------------------------
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+// Si tu as une config Haloscan de tes tools, dé-commente et utilise-la.
+// import { configureHaloscanServer } from "./haloscan-core.js";
 
 dotenv.config();
 
-// ==== Env ====
+// -------------------------
+// Environnement
+// -------------------------
 const PORT = parseInt(process.env.PORT || "3000", 10);
-const AUTH_ENABLED = process.env.AUTH_ENABLED === "true";
-const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
 const NODE_ENV = process.env.NODE_ENV || "production";
 const SERVER_NAME = process.env.MCP_SERVER_NAME || "Haloscan SEO Tools";
 const SERVER_VERSION = process.env.MCP_SERVER_VERSION || "1.0.0";
+
+const AUTH_ENABLED = process.env.AUTH_ENABLED === "true";
+const API_TOKEN = process.env.API_TOKEN || "";
+
 const MAX_CONNECTIONS = parseInt(process.env.MCP_MAX_CONNECTIONS || "100", 10);
 const CONNECTION_TIMEOUT = parseInt(process.env.MCP_CONNECTION_TIMEOUT || "3600", 10);
-const SESSION_TTL_MS = parseInt(process.env.MCP_SESSION_TTL || "30000", 10); // 30s
 
-// ==== Auth (optionnelle) ====
+// Origines autorisées (inclut explicitement ChatGPT)
+const CORS_ORIGIN = process.env.CORS_ORIGIN || "";
+const ALLOWED_ORIGINS = [
+  "https://chat.openai.com",
+  "https://staging.chat.openai.com",
+  CORS_ORIGIN || undefined,
+  "*" // garde le wildcard pour nos tests, on filtrera intelligemment ci-dessous
+].filter(Boolean) as string[];
+
+// -------------------------
+// Auth (optionnelle)
+// -------------------------
 function authorizeRequest(req: Request, res: Response, next: NextFunction): void {
   if (!AUTH_ENABLED) return next();
-  const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith("Bearer ")) {
-    res.status(401).send({ error: "Unauthorized", message: "Authorization: Bearer <token> required" });
+
+  const hdr = req.headers.authorization || "";
+  if (!hdr.startsWith("Bearer ")) {
+    res.status(401).json({ error: "Unauthorized", message: "Authorization: Bearer <token> required" });
     return;
   }
-  const token = authHeader.slice(7);
-  if (!process.env.API_TOKEN || token !== process.env.API_TOKEN) {
-    res.status(403).send({ error: "Forbidden", message: "Invalid authorization token" });
+  const token = hdr.slice(7);
+  if (!API_TOKEN || token !== API_TOKEN) {
+    res.status(403).json({ error: "Forbidden", message: "Invalid authorization token" });
     return;
   }
   next();
 }
 
-// ==== App ====
+// -------------------------
+// Express
+// -------------------------
 const app = express();
 
-// Logs
+// Logs simples
 app.use((req, _res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
   next();
 });
 
-// CORS + preflight
+// CORS — permet origin explicites + wildcard pour test
 app.use(
   cors({
-    origin: CORS_ORIGIN,
+    origin: (origin, cb) => {
+      // Requêtes internes (curl, same-origin) -> OK
+      if (!origin) return cb(null, true);
+      // Wildcard ? on accepte tout (utile en diagnose)
+      if (ALLOWED_ORIGINS.includes("*")) return cb(null, true);
+      // Sinon, doit faire partie de la liste
+      if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+      return cb(null, false);
+    },
     methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
     exposedHeaders: ["Content-Type"],
   })
 );
+// Répond aux pré-vols
 app.options("*", (_req, res) => res.sendStatus(200));
 
-// ⚠️ Body parser global -> on EXCLUT /messages pour conserver le flux brut
-app.use((req, res, next) => {
-  if (req.path === "/messages") return next();
-  return express.json()(req, res, next);
-});
+// JSON body
+app.use(express.json());
 
-// ---- Well-known MCP discovery ----
+// -------------------------
+// MCP Server
+// -------------------------
+const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
+// configureHaloscanServer(server); // si tu as tes tools maison
+console.log("Server configured with Haloscan tools (minimal)");
+
+const transports: Record<string, SSEServerTransport> = {};
+let activeConnections = 0;
+
+// Protéger SSE/messages si auth activée
+app.use(["/sse", "/messages"], authorizeRequest);
+
+// -------------------------
+// Well-known MCP discovery
+// -------------------------
+// Permet à ChatGPT de découvrir automatiquement où se connecter.
 app.get("/.well-known/mcp.json", (_req, res) => {
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache");
@@ -68,37 +113,42 @@ app.get("/.well-known/mcp.json", (_req, res) => {
     mcp: { version: "2024-06-01", protocol: "2.0" },
     sse: { url: "https://haloscan.dokify.eu/sse", heartbeatIntervalMs: 15000 },
     messages: { url: "https://haloscan.dokify.eu/messages" },
-    server: { name: "Haloscan SEO Tools", version: "1.0.0" }
+    server: { name: SERVER_NAME, version: SERVER_VERSION }
   });
 });
 
-// ==== MCP server ====
-const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
-console.log("Server configured with Haloscan tools (minimal)");
-
-// Suivi des transports
-const transports: Record<string, SSEServerTransport> = {};
-let activeConnections = 0;
-
-app.use(["/sse", "/messages"], authorizeRequest);
-
-// Certains clients commencent par POST /sse
-app.post("/sse", (_req, res) => res.status(200).end());
-
-// ==== SSE endpoint ====
+// -------------------------
+// SSE Endpoint
+// -------------------------
 app.get("/sse", (req: Request, res: Response): void => {
   if (activeConnections >= MAX_CONNECTIONS) {
-    res.status(503).send({ error: "Service Unavailable", message: "Maximum number of connections reached" });
+    res.status(503).json({ error: "Service Unavailable", message: "Maximum number of connections reached" });
     return;
   }
 
-  // Laisse le SDK gérer les en-têtes ; on ne fait PAS de setHeader ici
+  // Laisser le SDK gérer l’ouverture; on ne pousse pas de données avant connect()
+  // mais on indique des headers utiles (pas writeHead!)
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+
+  // Long timeout
   req.socket.setTimeout(CONNECTION_TIMEOUT * 1000);
 
-  // Compatibilité SDK 1.7.x (2 args) / >=1.8.x ({ req, res })
-  const SSECtor: any = SSEServerTransport as any;
-  const transport: any =
-    SSECtor.length >= 2 ? new SSECtor("/messages", res) : new SSECtor({ req, res });
+  // Compat SDK: 1.7.x (2 args) ou >=1.8.0 ({req,res})
+  let transport: SSEServerTransport;
+  const Ctor: any = SSEServerTransport as any;
+  try {
+    transport =
+      Ctor.length >= 2
+        ? new Ctor("/messages", res)   // signature ancienne
+        : new Ctor({ req, res });      // signature moderne
+  } catch (e) {
+    console.error("Failed to construct SSEServerTransport:", e);
+    res.status(500).end();
+    return;
+  }
 
   const sessionId: string = (transport as any).sessionId;
   transports[sessionId] = transport;
@@ -108,85 +158,94 @@ app.get("/sse", (req: Request, res: Response): void => {
     `[${new Date().toISOString()}] SSE connection established: ${sessionId} (${activeConnections}/${MAX_CONNECTIONS} active)`
   );
 
-  // Keepalive pour éviter que les proxys ferment la connexion
-  const keepAlive = setInterval(() => {
-    try { res.write(`: ping\n\n`); } catch { /* ignore */ }
-  }, 15000);
-
   res.on("close", () => {
     console.log(`[${new Date().toISOString()}] SSE connection closed: ${sessionId}`);
-    clearInterval(keepAlive);
-    // Nettoyage retardé pour laisser passer un POST un peu tardif
-    setTimeout(() => {
-      if (transports[sessionId]) {
-        delete transports[sessionId];
-        activeConnections--;
-        console.log(`[${new Date().toISOString()}] Transport cleaned for sessionId ${sessionId}`);
-      }
-    }, SESSION_TTL_MS);
+    delete transports[sessionId];
+    activeConnections--;
   });
 
-  // Démarre le flux géré par le SDK (il enverra les en-têtes)
+  // Branche le transport au serveur MCP (ne rien écrire AVANT ceci)
   server.connect(transport);
-
-  // Envoi de l'event endpoint APRÈS connect(), quand les en-têtes sont partis
-  setImmediate(() => {
-    try {
-      const proto =
-        (req.headers["x-forwarded-proto"] as string) ||
-        req.protocol ||
-        "https";
-      const host = req.headers.host!;
-      const endpointAbs = `${proto}://${host}/messages?sessionId=${sessionId}`;
-      res.write(`event: endpoint\n`);
-      res.write(`data: ${endpointAbs}\n\n`);
-      console.log(
-        `[${new Date().toISOString()}] Sent endpoint event for session ${sessionId} -> ${endpointAbs}`
-      );
-    } catch (e) {
-      console.error("Failed to write endpoint event:", e);
-    }
-  });
 });
 
-// ==== Messages (flux brut, pas de express.json ici) ====
+// Certaines implémentations testent POST /sse -> répondons 200 pour ne pas échouer
+app.post("/sse", (_req, res) => res.status(200).end());
+
+// -------------------------
+// Messages Endpoint
+// -------------------------
 app.post("/messages", (req: Request, res: Response): void => {
   const sessionId = String(req.query.sessionId || "");
-  console.log("POST /messages", { sessionId });
+  console.log("POST /messages", { sessionId, hasBody: !!req.body });
 
   if (!sessionId) {
-    res.status(400).send({ error: "Bad Request", message: "sessionId query parameter is required" });
+    res.status(400).json({ error: "Bad Request", message: "sessionId query parameter is required" });
     return;
   }
 
   const transport = transports[sessionId];
   if (!transport) {
-    console.log("No transport for sessionId", sessionId);
-    res.status(404).send({ error: "Not Found", message: "No active session found for the provided sessionId" });
+    res.status(404).json({ error: "Not Found", message: "No active session found for the provided sessionId" });
     return;
   }
 
-  // CORS minimal côté réponse
+  // Headers CORS basiques pour clients navigateur
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
-  // Transfert du flux brut au transport (sinon "stream is not readable")
+  // Laisse le SDK parser et router le message JSON-RPC
   transport.handlePostMessage(req, res);
 });
 
-// ==== Tools-info (debug) ====
-app.get("/tools-info", (_req: Request, res: Response): void => {
-  res.status(200).send({
+// -------------------------
+// Tools info (debug simple)
+// -------------------------
+app.get("/tools-info", (_req: Request, res: Response) => {
+  res.status(200).json({
     server: SERVER_NAME,
     version: SERVER_VERSION,
+    tools: getHardcodedTools(),
     endpoints: { sse: "/sse", messages: "/messages", health: "/health", tools: "/tools-info" },
     stats: { activeConnections, maxConnections: MAX_CONNECTIONS, uptime: process.uptime() },
   });
 });
 
-// ==== Health ====
-app.get("/health", (_req: Request, res: Response): void => {
-  res.status(200).send({
+function getHardcodedTools(): any[] {
+  return [
+    {
+      name: "set_api_key",
+      description: "Définir la clé API.",
+      parameters: { properties: { apiKey: { type: "string", description: "Your Haloscan API key" } }, required: ["apiKey"] },
+    },
+    {
+      name: "get_user_credit",
+      description: "Obtenir les informations de crédit de l'utilisateur.",
+      parameters: { properties: {}, required: [] },
+    },
+    {
+      name: "get_keywords_overview",
+      description: "Obtenir un aperçu des mots-clés.",
+      parameters: {
+        properties: {
+          keyword: { type: "string", description: "Seed keyword" },
+          requested_data: { type: "array", items: { type: "string" }, description: "Specific data fields to request" },
+        },
+        required: ["keyword", "requested_data"],
+      },
+    },
+    {
+      name: "get_keywords_match",
+      description: "Obtenir la correspondance des mots-clés.",
+      parameters: { properties: { keyword: { type: "string", description: "Seed keyword" } }, required: ["keyword"] },
+    },
+  ];
+}
+
+// -------------------------
+// Health & racine
+// -------------------------
+app.get("/health", (_req: Request, res: Response) => {
+  res.status(200).json({
     status: "ok",
     server: SERVER_NAME,
     version: SERVER_VERSION,
@@ -196,26 +255,27 @@ app.get("/health", (_req: Request, res: Response): void => {
   });
 });
 
-app.get("/", (_req: Request, res: Response): void => res.redirect("/tools-info"));
+app.get("/", (_req, res) => res.redirect("/tools-info"));
 
-// ==== Error handler ====
-app.use((err: Error, _req: Request, res: Response, _next: NextFunction): void => {
+// -------------------------
+// Error handler global
+// -------------------------
+app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   console.error(`[${new Date().toISOString()}] Server error:`, err);
-  res
-    .status(500)
-    .send({ error: "Internal Server Error", message: NODE_ENV === "development" ? err.message : "An unexpected error occurred" });
+  res.status(500).json({
+    error: "Internal Server Error",
+    message: NODE_ENV === "development" ? err.message : "An unexpected error occurred",
+  });
 });
 
-// ==== Start ====
+// -------------------------
+// Start
+// -------------------------
 const httpServer = app.listen(PORT, () => {
   console.log(`[${new Date().toISOString()}] ${SERVER_NAME} v${SERVER_VERSION} running on http://localhost:${PORT}`);
-  console.log(`Connect to /sse for SSE transport`);
-  console.log(`Authentication ${AUTH_ENABLED ? "enabled" : "disabled"}`);
-  console.log(`Environment: ${NODE_ENV}`);
-  console.log(`Max connections: ${MAX_CONNECTIONS}`);
+  console.log(`CORS origins: ${ALLOWED_ORIGINS.join(", ")}`);
 });
 
-// Graceful shutdown
 process.on("SIGTERM", () => {
   console.log("SIGTERM received, shutting down gracefully");
   httpServer.close(() => {
