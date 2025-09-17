@@ -16,8 +16,9 @@ const SERVER_NAME = process.env.MCP_SERVER_NAME || "Haloscan SEO Tools";
 const SERVER_VERSION = process.env.MCP_SERVER_VERSION || "1.0.0";
 const MAX_CONNECTIONS = parseInt(process.env.MCP_MAX_CONNECTIONS || "100", 10);
 const CONNECTION_TIMEOUT = parseInt(process.env.MCP_CONNECTION_TIMEOUT || "3600", 10);
+const SESSION_TTL_MS = parseInt(process.env.MCP_SESSION_TTL || "30000", 10); // 30s par défaut
 
-// ---- Auth ----
+// ---- Auth (optionnelle) ----
 function authorizeRequest(req: Request, res: Response, next: NextFunction): void {
   if (!AUTH_ENABLED) return next();
   const authHeader = req.headers.authorization;
@@ -72,43 +73,56 @@ app.get("/sse", (req: Request, res: Response): void => {
     return;
   }
 
-  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-  res.setHeader("X-Accel-Buffering", "no");
-  (res as any).flushHeaders?.();
-
+  // IMPORTANT : ne pas définir d’en-têtes ici → le SDK s’en charge.
   req.socket.setTimeout(CONNECTION_TIMEOUT * 1000);
 
+  // Compat SDK 1.7.x (2 args) / ≥1.8.x ({ req, res })
   const SSECtor: any = SSEServerTransport as any;
   const transport: any =
-    SSECtor.length >= 2 ? new SSECtor("/messages", res) : new SSECtor({ req, res });
+    SSECtor.length >= 2
+      ? new SSECtor("/messages", res) // ancienne signature
+      : new SSECtor({ req, res });    // nouvelle signature
 
   const sessionId: string = (transport as any).sessionId;
-
-  res.write(`event: endpoint\n`);
-  res.write(`data: https://haloscan.dokify.eu/messages?sessionId=${sessionId}\n\n`);
-
   transports[sessionId] = transport;
   activeConnections++;
 
-  console.log(
-    `[${new Date().toISOString()}] SSE connection established: ${sessionId} (${activeConnections}/${MAX_CONNECTIONS} active)`
-  );
+  console.log(`[${new Date().toISOString()}] SSE connection established: ${sessionId} (${activeConnections}/${MAX_CONNECTIONS} active)`);
 
-  // ✅ cleanup retardé pour éviter la perte immédiate du transport
+  // keepalive pour empêcher la fermeture par proxy
+  const keepAlive = setInterval(() => {
+    try { res.write(`: ping\n\n`); } catch { /* ignore */ }
+  }, 15000);
+
   res.on("close", () => {
     console.log(`[${new Date().toISOString()}] SSE connection closed: ${sessionId}`);
+    // TTL : on garde la session un court délai pour laisser passer un POST tardif
     setTimeout(() => {
       if (transports[sessionId]) {
         delete transports[sessionId];
         activeConnections--;
         console.log(`[${new Date().toISOString()}] Transport cleaned for sessionId ${sessionId}`);
       }
-    }, 30000); // garde en mémoire 30 secondes
+    }, SESSION_TTL_MS);
+    clearInterval(keepAlive);
   });
 
+  // LANCE le flux géré par le SDK (il enverra les en-têtes)
   server.connect(transport);
+
+  // APRÈS connect() → on publie l’event endpoint
+  setImmediate(() => {
+    try {
+      const proto = (req.headers["x-forwarded-proto"] as string) || req.protocol || "https";
+      const host = req.headers.host!;
+      const endpointAbs = `${proto}://${host}/messages?sessionId=${sessionId}`;
+      res.write(`event: endpoint\n`);
+      res.write(`data: ${endpointAbs}\n\n`);
+      console.log(`[${new Date().toISOString()}] Sent endpoint event for session ${sessionId} -> ${endpointAbs}`);
+    } catch (e) {
+      console.error("Failed to write endpoint event:", e);
+    }
+  });
 });
 
 // ---- Messages ----
@@ -136,46 +150,13 @@ app.post("/messages", (req: Request, res: Response): void => {
 
 // ---- Tools-info ----
 app.get("/tools-info", (_req: Request, res: Response): void => {
-  const tools = getHardcodedTools();
   res.status(200).send({
     server: SERVER_NAME,
     version: SERVER_VERSION,
-    tools,
     endpoints: { sse: "/sse", messages: "/messages", health: "/health", tools: "/tools-info" },
     stats: { activeConnections, maxConnections: MAX_CONNECTIONS, uptime: process.uptime() },
   });
 });
-
-function getHardcodedTools(): any[] {
-  return [
-    {
-      name: "set_api_key",
-      description: "Définir la clé API.",
-      parameters: { properties: { apiKey: { type: "string", description: "Your Haloscan API key" } }, required: ["apiKey"] },
-    },
-    {
-      name: "get_user_credit",
-      description: "Obtenir les informations de crédit de l'utilisateur.",
-      parameters: { properties: {}, required: [] },
-    },
-    {
-      name: "get_keywords_overview",
-      description: "Obtenir un aperçu des mots-clés.",
-      parameters: {
-        properties: {
-          keyword: { type: "string", description: "Seed keyword" },
-          requested_data: { type: "array", items: { type: "string" }, description: "Specific data fields to request" },
-        },
-        required: ["keyword", "requested_data"],
-      },
-    },
-    {
-      name: "get_keywords_match",
-      description: "Obtenir la correspondance des mots-clés.",
-      parameters: { properties: { keyword: { type: "string", description: "Seed keyword" } }, required: ["keyword"] },
-    },
-  ];
-}
 
 // ---- Health ----
 app.get("/health", (_req: Request, res: Response): void => {
