@@ -18,11 +18,16 @@ const CONNECTION_TIMEOUT = parseInt(process.env.MCP_CONNECTION_TIMEOUT || "3600"
 
 const app = express();
 
+// si tu es derrière Cloudflare/NGINX, fais confiance au proxy
+app.set("trust proxy", true);
+
+// log simple
 app.use((req, _res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
   next();
 });
 
+// CORS
 app.use(
   cors({
     origin: CORS_ORIGIN,
@@ -34,7 +39,7 @@ app.use(
 app.options("*", (_req, res) => res.sendStatus(200));
 app.use(express.json());
 
-// -- Auth optionnelle pour /sse et /messages
+// --- Auth optionnelle (pour /sse et /messages) ---
 function authorize(req: Request, res: Response, next: NextFunction) {
   if (!AUTH_ENABLED) return next();
   const h = req.headers.authorization;
@@ -52,34 +57,33 @@ function authorize(req: Request, res: Response, next: NextFunction) {
 
 const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
 
-// TODO: enregistre tes outils ici si tu en as
-// configureHaloscanServer(server);
+// TODO si tu as des outils/prompts : configureHaloscanServer(server);
 
 type TransportMap = Record<string, SSEServerTransport>;
 const transports: TransportMap = {};
 let activeConnections = 0;
 
-// certains clients POSTent /sse : retourne 200 (no-op)
+// certains clients POSTent /sse : noop 200
 app.post("/sse", authorize, (_req, res) => res.status(200).end());
 
-// ---- SSE: ne RIEN écrire soi-même, laisser le SDK gérer ----
+// ---- SSE (laisser le SDK écrire ; NE PAS faire res.write) ----
 app.get("/sse", authorize, (req: Request, res: Response) => {
   if (activeConnections >= MAX_CONNECTIONS) {
     res.status(503).json({ error: "Service Unavailable" });
     return;
   }
 
-  // allonger le timeout socket
+  // socket longue durée
   req.socket.setTimeout(CONNECTION_TIMEOUT * 1000);
 
-  // SDK >= 1.7 : constructeur { req, res }
+  // SDK >= 1.8.0 : signature { req, res }
   const transport = new SSEServerTransport({ req, res });
 
-  // le SDK enverra l’event "endpoint" et les pings
+  // branchement au serveur MCP -> le SDK gère "endpoint" + pings
   server.connect(transport);
 
-  // garder une trace des connexions
-  // @ts-ignore - sessionId est exposé par le transport
+  // suivi de session
+  // @ts-ignore: sessionId est exposé par le transport
   const sessionId: string = (transport as any).sessionId;
   transports[sessionId] = transport;
   activeConnections++;
@@ -109,24 +113,22 @@ app.post("/messages", authorize, (req: Request, res: Response) => {
     res.status(404).json({ error: "Not Found", message: "No active session" });
     return;
   }
-  // CORS pour clients stricts
+
+  // CORS permissif pour clients stricts
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
+  // délègue au SDK JSON-RPC
   transport.handlePostMessage(req, res);
 });
 
 // ---- Fichier de découverte MCP ----
 app.get("/.well-known/mcp.json", (_req, res) => {
+  const host = process.env.PUBLIC_HOST || "haloscan.dokify.eu";
   res.json({
     mcp: { version: "2024-06-01", protocol: "2.0" },
-    sse: {
-      url: `https://${process.env.PUBLIC_HOST || "haloscan.dokify.eu"}/sse`,
-      heartbeatIntervalMs: 15000,
-    },
-    messages: {
-      url: `https://${process.env.PUBLIC_HOST || "haloscan.dokify.eu"}/messages`,
-    },
+    sse: { url: `https://${host}/sse`, heartbeatIntervalMs: 15000 },
+    messages: { url: `https://${host}/messages` },
     server: { name: SERVER_NAME, version: SERVER_VERSION },
   });
 });
@@ -143,8 +145,10 @@ app.get("/health", (_req, res) => {
   });
 });
 
+// redirect racine vers mcp.json
 app.get("/", (_req, res) => res.redirect("/.well-known/mcp.json"));
 
+// erreurs
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   console.error(`[${new Date().toISOString()}]`, err);
   res.status(500).json({
@@ -154,5 +158,7 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`[${new Date().toISOString()}] ${SERVER_NAME} v${SERVER_VERSION} on :${PORT}`);
+  console.log(
+    `[${new Date().toISOString()}] ${SERVER_NAME} v${SERVER_VERSION} on :${PORT}`
+  );
 });
