@@ -1,4 +1,5 @@
 // src/http-server.ts
+
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -87,8 +88,7 @@ app.get("/sse", authorize, (req: Request, res: Response) => {
   // Connecter le transport au serveur MCP => le SDK enverra "endpoint" + pings
   server.connect(transport as any);
 
-  // Récupérer un identifiant de session (exposé par le transport)
-  // @ts-ignore
+  // @ts-ignore - exposé par le transport
   const sessionId: string = (transport as any).sessionId;
   transports[sessionId] = transport;
   activeConnections++;
@@ -128,10 +128,21 @@ app.post("/messages", authorize, (req: Request, res: Response) => {
 
 /** ---- Fichier de découverte MCP ---- */
 app.get("/.well-known/mcp.json", (_req, res) => {
+  // Désactive le cache côté proxy/CDN par prudence
+  res.setHeader("Cache-Control", "no-store");
   res.json({
-    mcp: { version: "2024-06-01", protocol: "2.0" },
-    sse: { url: `https://${PUBLIC_HOST}/sse`, heartbeatIntervalMs: 15000 },
-    messages: { url: `https://${PUBLIC_HOST}/messages` },
+    mcp: {
+      version: "1.0",
+      endpoints: {
+        sse: {
+          url: `https://${PUBLIC_HOST}/sse`,
+          heartbeatIntervalMs: 15000,
+        },
+        messages: {
+          url: `https://${PUBLIC_HOST}/messages`,
+        },
+      },
+    },
     server: { name: SERVER_NAME, version: SERVER_VERSION },
   });
 });
