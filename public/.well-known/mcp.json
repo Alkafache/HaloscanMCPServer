@@ -1,0 +1,18 @@
+{
+  "mcp": {
+    "version": "1.0",
+    "endpoints": {
+      "sse": {
+        "url": "https://haloscan.dokify.eu/sse",
+        "heartbeatIntervalMs": 15000
+      },
+      "messages": {
+        "url": "https://haloscan.dokify.eu/messages"
+      }
+    }
+  },
+  "server": {
+    "name": "Haloscan SEO Tools",
+    "version": "1.0.0"
+  }
+}
