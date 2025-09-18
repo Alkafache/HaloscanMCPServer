@@ -37,7 +37,6 @@ app.use(
   })
 );
 app.options("*", (_req, res) => res.sendStatus(200));
-app.use(express.json());
 
 /** Auth optionnelle */
 function authorize(req: Request, res: Response, next: NextFunction) {
@@ -57,16 +56,18 @@ function authorize(req: Request, res: Response, next: NextFunction) {
 
 /** ---- MCP server ---- */
 const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
-// TODO: enregistrer vos outils ici si besoin (e.g. configureHaloscanServer(server))
+// (Enregistre tes outils ici si besoin)
 
-/** On mémorise les transports actifs pour /messages */
-type TransportMap = Record<string, SSEServerTransport>;
-const transports: TransportMap = {};
+/** Transports actifs pour /messages */
+const transports: Record<string, SSEServerTransport> = {};
 let activeConnections = 0;
 
+/** Certains clients POSTent /sse par erreur : no-op */
+app.post("/sse", authorize, (_req, res) => res.status(200).end());
+
 /** ---- SSE endpoint ----
- * IMPORTANT : ne pas écrire dans res nous-mêmes; laisser le SDK gérer les events/pings.
- * On gère les deux signatures (v1.7 et v1.8) côté types ET exécution.
+ * ⚠️ NE RIEN ÉCRIRE dans `res` soi-même ; on laisse le SDK gérer.
+ * Compatibilité signatures SDK (v1.7 et v1.8)
  */
 app.get("/sse", authorize, (req: Request, res: Response) => {
   if (activeConnections >= MAX_CONNECTIONS) {
@@ -74,21 +75,16 @@ app.get("/sse", authorize, (req: Request, res: Response) => {
     return;
   }
 
-  // socket longue durée
   req.socket.setTimeout(CONNECTION_TIMEOUT * 1000);
 
-  // Compatibilité des signatures :
-  // - v1.7 : new SSEServerTransport("/messages", res)
-  // - v1.8 : new SSEServerTransport({ req, res })
   const Ctor: any = SSEServerTransport as any;
   const transport: SSEServerTransport =
     Ctor.length >= 2 ? new Ctor("/messages", res) : new Ctor({ req, res });
 
-  // Connecter le transport au serveur MCP => le SDK enverra "endpoint" + pings
+  // Le SDK enverra event "endpoint" + keepalive
   server.connect(transport as any);
 
-  // Récupérer un identifiant de session (exposé par le transport)
-  // @ts-ignore
+  // @ts-ignore - le transport expose un id session
   const sessionId: string = (transport as any).sessionId;
   transports[sessionId] = transport;
   activeConnections++;
@@ -106,7 +102,9 @@ app.get("/sse", authorize, (req: Request, res: Response) => {
   });
 });
 
-/** ---- Messages endpoint ---- */
+/** ---- Messages endpoint ----
+ * ⚠️ Surtout PAS de `express.json()` ici : le SDK lit le flux brut.
+ */
 app.post("/messages", authorize, (req: Request, res: Response) => {
   const sessionId = String(req.query.sessionId || "");
   if (!sessionId) {
@@ -119,7 +117,7 @@ app.post("/messages", authorize, (req: Request, res: Response) => {
     return;
   }
 
-  // CORS friendly
+  // CORS permissif
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
@@ -149,9 +147,11 @@ app.get("/health", (_req, res) => {
 });
 app.get("/", (_req, res) => res.redirect("/.well-known/mcp.json"));
 
-/** Error handler */
+/** Error handler (filet de sécurité) */
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   console.error(`[${new Date().toISOString()}]`, err);
+  // Ne pas renvoyer du texte après que le SDK ait écrit la réponse
+  if (res.headersSent) return;
   res.status(500).json({
     error: "Internal Server Error",
     message: NODE_ENV === "development" ? err.message : "unexpected error",
@@ -160,7 +160,5 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
 
 /** Start */
 app.listen(PORT, () => {
-  console.log(
-    `[${new Date().toISOString()}] ${SERVER_NAME} v${SERVER_VERSION} on :${PORT}`
-  );
+  console.log(`[${new Date().toISOString()}] ${SERVER_NAME} v${SERVER_VERSION} on :${PORT}`);
 });
