@@ -3,9 +3,6 @@
   "version": "1.0.0",
   "description": "Model Context Protocol server for Haloscan SEO API",
   "license": "MIT",
-  "author": "Anthropic, PBC (https://anthropic.com)",
-  "homepage": "https://modelcontextprotocol.io",
-  "bugs": "https://github.com/modelcontextprotocol/servers/issues",
   "type": "module",
   "main": "build/index.js",
   "bin": {
@@ -16,15 +13,8 @@
     "start": "node build/index.js",
     "http": "node build/http-server.js",
     "dev": "npx ts-node --esm src/index.ts",
-    "dev:http": "npx ts-node --esm src/http-server.ts",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev:http": "npx ts-node --esm src/http-server.ts"
   },
-  "keywords": [
-    "mcp",
-    "haloscan",
-    "seo",
-    "n8n"
-  ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.8.0",
     "axios": "^1.6.0",
@@ -41,11 +31,7 @@
     "ts-node": "^10.9.0",
     "typescript": "^5.4.0"
   },
-  "overrides": {
-    "@modelcontextprotocol/sdk": "^1.8.0"
-  },
   "engines": {
-    "node": ">=18.17.0"
-  },
-  "packageManager": "npm@10"
+    "node": ">=16.0.0"
+  }
 }
