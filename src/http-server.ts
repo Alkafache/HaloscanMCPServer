@@ -74,13 +74,14 @@ app.get("/sse", authorize, (req: Request, res: Response) => {
 
   req.socket.setTimeout(CONNECTION_TIMEOUT * 1000);
 
+  // Compat signatures sdk v1.7/v1.8
   const Ctor: any = SSEServerTransport as any;
   const transport: SSEServerTransport =
     Ctor.length >= 2 ? new Ctor("/messages", res) : new Ctor({ req, res });
 
   server.connect(transport as any);
 
-  // @ts-ignore
+  // @ts-ignore exposé par le transport
   const sessionId: string = (transport as any).sessionId;
   transports[sessionId] = transport;
   activeConnections++;
@@ -118,30 +119,24 @@ app.post("/messages", authorize, (req: Request, res: Response) => {
   transport.handlePostMessage(req, res);
 });
 
-/** ---- Découverte MCP (ultra-compatible) ---- */
+/** ---- Découverte MCP (sans doublons, conforme) ---- */
 function discoveryPayload(baseUrl: string) {
   const sse = { url: `${baseUrl}/sse`, heartbeatIntervalMs: 15000 };
   const messages = { url: `${baseUrl}/messages` };
 
   return {
-    // Format recommandé (endpoints sous "mcp")
     mcp: {
-      version: "2024-06-01",            // date-based version utilisée par le spec
-      protocol: "2.0",                  // indicatif de protocole si un validateur l'exige
+      version: "1.0",               // valeur minimale et acceptée par l’UI
       endpoints: { sse, messages },
     },
-    // Champs miroirs pour d’anciens validateurs
-    endpoints: { sse, messages },
-    sse,
-    messages,
     server: { name: SERVER_NAME, version: SERVER_VERSION },
   };
 }
 
 function sendDiscovery(res: Response) {
   res.setHeader("Content-Type", "application/json; charset=utf-8");
-  res.setHeader("Cache-Control", "no-store");       // évite un cache Cloudflare résiduel
-  res.setHeader("Access-Control-Allow-Origin", "*"); // certains validateurs le regardent
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Access-Control-Allow-Origin", "*");
   res.json(discoveryPayload(`https://${PUBLIC_HOST}`));
 }
 
