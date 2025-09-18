@@ -58,37 +58,29 @@ function authorize(req: Request, res: Response, next: NextFunction) {
 
 /** ---- MCP server ---- */
 const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
-// TODO: enregistrer vos outils ici si besoin (e.g. configureHaloscanServer(server))
+// TODO: enregistrer vos outils ici
 
 /** On mémorise les transports actifs pour /messages */
 type TransportMap = Record<string, SSEServerTransport>;
 const transports: TransportMap = {};
 let activeConnections = 0;
 
-/** ---- SSE endpoint ----
- * IMPORTANT : ne pas écrire dans res nous-mêmes; laisser le SDK gérer les events/pings.
- * On gère les deux signatures (v1.7 et v1.8) côté types ET exécution.
- */
+/** ---- SSE endpoint ---- */
 app.get("/sse", authorize, (req: Request, res: Response) => {
   if (activeConnections >= MAX_CONNECTIONS) {
     res.status(503).json({ error: "Service Unavailable" });
     return;
   }
 
-  // socket longue durée
   req.socket.setTimeout(CONNECTION_TIMEOUT * 1000);
 
-  // Compatibilité des signatures :
-  // - v1.7 : new SSEServerTransport("/messages", res)
-  // - v1.8 : new SSEServerTransport({ req, res })
   const Ctor: any = SSEServerTransport as any;
   const transport: SSEServerTransport =
     Ctor.length >= 2 ? new Ctor("/messages", res) : new Ctor({ req, res });
 
-  // Connecter le transport au serveur MCP => le SDK enverra "endpoint" + pings
   server.connect(transport as any);
 
-  // @ts-ignore - exposé par le transport
+  // @ts-ignore
   const sessionId: string = (transport as any).sessionId;
   transports[sessionId] = transport;
   activeConnections++;
@@ -126,25 +118,41 @@ app.post("/messages", authorize, (req: Request, res: Response) => {
   transport.handlePostMessage(req, res);
 });
 
-/** ---- Fichier de découverte MCP ---- */
-app.get("/.well-known/mcp.json", (_req, res) => {
-  // Désactive le cache côté proxy/CDN par prudence
-  res.setHeader("Cache-Control", "no-store");
-  res.json({
+/** ---- Découverte MCP (ultra-compatible) ---- */
+function discoveryPayload(baseUrl: string) {
+  const sse = { url: `${baseUrl}/sse`, heartbeatIntervalMs: 15000 };
+  const messages = { url: `${baseUrl}/messages` };
+
+  return {
+    // Format recommandé (endpoints sous "mcp")
     mcp: {
-      version: "1.0",
-      endpoints: {
-        sse: {
-          url: `https://${PUBLIC_HOST}/sse`,
-          heartbeatIntervalMs: 15000,
-        },
-        messages: {
-          url: `https://${PUBLIC_HOST}/messages`,
-        },
-      },
+      version: "2024-06-01",            // date-based version utilisée par le spec
+      protocol: "2.0",                  // indicatif de protocole si un validateur l'exige
+      endpoints: { sse, messages },
     },
+    // Champs miroirs pour d’anciens validateurs
+    endpoints: { sse, messages },
+    sse,
+    messages,
     server: { name: SERVER_NAME, version: SERVER_VERSION },
-  });
+  };
+}
+
+function sendDiscovery(res: Response) {
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.setHeader("Cache-Control", "no-store");       // évite un cache Cloudflare résiduel
+  res.setHeader("Access-Control-Allow-Origin", "*"); // certains validateurs le regardent
+  res.json(discoveryPayload(`https://${PUBLIC_HOST}`));
+}
+
+// Endpoint officiel
+app.get("/.well-known/mcp.json", (_req, res) => {
+  sendDiscovery(res);
+});
+
+// Alias (certains clients testent ceci)
+app.get("/mcp.json", (_req, res) => {
+  sendDiscovery(res);
 });
 
 /** Health + root */
